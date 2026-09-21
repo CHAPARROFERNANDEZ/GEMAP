@@ -85,7 +85,7 @@ def outlook_link(descripcion, empresa_nombre, fecha_str, tipo):
     subject = f"{empresa_nombre}: {descripcion}"
     body = f"Recordatorio GEMAP ({TIPO_LABEL.get(tipo, tipo)}) — {empresa_nombre}"
     return (
-        "https://outlook.live.com/calendar/0/deeplink/compose"
+        "https://outlook.office.com/calendar/0/deeplink/compose"
         f"?path=/calendar/action/compose&rru=addevent"
         f"&subject={quote(subject)}&startdt={quote(start)}&enddt={quote(end)}"
         f"&body={quote(body)}&location={quote(empresa_nombre)}"
