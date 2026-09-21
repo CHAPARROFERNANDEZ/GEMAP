@@ -46,9 +46,13 @@ def init_db():
             fecha TEXT,                   -- fecha límite o de reunión (YYYY-MM-DD)
             creado TEXT,
             completado TEXT,
+            outlook_event_id TEXT,
             FOREIGN KEY (empresa_id) REFERENCES empresas(id)
         )
     """)
+    tareas_cols = {row["name"] for row in conn.execute("PRAGMA table_info(tareas)")}
+    if "outlook_event_id" not in tareas_cols:
+        conn.execute("ALTER TABLE tareas ADD COLUMN outlook_event_id TEXT")
     conn.commit()
     conn.close()
 
@@ -105,13 +109,20 @@ def add_tarea(empresa_id: str, descripcion: str, tipo: str, fecha: str | None):
     conn = get_conn()
     tid = str(uuid.uuid4())
     conn.execute(
-        "INSERT INTO tareas (id, empresa_id, descripcion, tipo, estado, fecha, creado, completado) "
-        "VALUES (?, ?, ?, ?, 'pendiente', ?, ?, NULL)",
+        "INSERT INTO tareas (id, empresa_id, descripcion, tipo, estado, fecha, creado, completado, outlook_event_id) "
+        "VALUES (?, ?, ?, ?, 'pendiente', ?, ?, NULL, NULL)",
         (tid, empresa_id, descripcion, tipo, fecha, datetime.utcnow().isoformat()),
     )
     conn.commit()
     conn.close()
     return tid
+
+
+def set_outlook_event_id(tarea_id: str, event_id: str):
+    conn = get_conn()
+    conn.execute("UPDATE tareas SET outlook_event_id = ? WHERE id = ?", (event_id, tarea_id))
+    conn.commit()
+    conn.close()
 
 
 def list_tareas(empresa_id: str | None = None):
