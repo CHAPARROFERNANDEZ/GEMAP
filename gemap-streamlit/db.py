@@ -21,9 +21,21 @@ def init_db():
             nombre TEXT NOT NULL,
             responsable TEXT DEFAULT '',
             particularidades TEXT DEFAULT '',
+            actividad TEXT DEFAULT '',
+            analitica INTEGER DEFAULT 0,
+            sii INTEGER DEFAULT 0,
             creado TEXT
         )
     """)
+    # Migración suave para bases de datos creadas con el esquema anterior
+    existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(empresas)")}
+    for col, ddl in [
+        ("actividad", "ALTER TABLE empresas ADD COLUMN actividad TEXT DEFAULT ''"),
+        ("analitica", "ALTER TABLE empresas ADD COLUMN analitica INTEGER DEFAULT 0"),
+        ("sii", "ALTER TABLE empresas ADD COLUMN sii INTEGER DEFAULT 0"),
+    ]:
+        if col not in existing_cols:
+            conn.execute(ddl)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS tareas (
             id TEXT PRIMARY KEY,
@@ -77,11 +89,13 @@ def get_empresa(empresa_id: str):
     return dict(row) if row else None
 
 
-def update_empresa(empresa_id: str, responsable: str, particularidades: str):
+def update_empresa(empresa_id: str, responsable: str, particularidades: str,
+                    actividad: str = "", analitica: bool = False, sii: bool = False):
     conn = get_conn()
     conn.execute(
-        "UPDATE empresas SET responsable = ?, particularidades = ? WHERE id = ?",
-        (responsable, particularidades, empresa_id),
+        "UPDATE empresas SET responsable = ?, particularidades = ?, actividad = ?, "
+        "analitica = ?, sii = ? WHERE id = ?",
+        (responsable, particularidades, actividad, int(analitica), int(sii), empresa_id),
     )
     conn.commit()
     conn.close()
