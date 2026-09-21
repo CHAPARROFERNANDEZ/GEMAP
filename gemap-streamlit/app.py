@@ -60,13 +60,35 @@ def days_until(fecha_str):
 
 
 def fmt_date(fecha_str):
+    """Formato español dd/mm/aaaa, sin depender del locale del servidor."""
     if not fecha_str:
         return ""
     try:
         d = datetime.strptime(fecha_str[:10], "%Y-%m-%d").date()
     except ValueError:
         return ""
-    return d.strftime("%-d %b")
+    return d.strftime("%d/%m/%Y")
+
+
+MESES_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+            "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+
+
+def outlook_link(descripcion, empresa_nombre, fecha_str, tipo):
+    """Enlace que abre Outlook Web con el evento precargado (sin necesitar conectar cuenta)."""
+    if not fecha_str:
+        return None
+    from urllib.parse import quote
+    start = f"{fecha_str[:10]}T09:00:00"
+    end = f"{fecha_str[:10]}T09:30:00"
+    subject = f"{empresa_nombre}: {descripcion}"
+    body = f"Recordatorio GEMAP ({TIPO_LABEL.get(tipo, tipo)}) — {empresa_nombre}"
+    return (
+        "https://outlook.office.com/calendar/0/deeplink/compose"
+        f"?path=/calendar/action/compose&rru=addevent"
+        f"&subject={quote(subject)}&startdt={quote(start)}&enddt={quote(end)}"
+        f"&body={quote(body)}&location={quote(empresa_nombre)}"
+    )
 
 
 # ---------------------------------------------------------------- Sidebar
@@ -88,6 +110,18 @@ with st.sidebar:
     for t in tareas_all:
         if t["estado"] != "hecho":
             counts[t["empresa_id"]] = counts.get(t["empresa_id"], 0) + 1
+
+    name_to_id = {e["nombre"]: e["id"] for e in empresas}
+    buscada = st.selectbox(
+        "Buscar empresa",
+        options=sorted(name_to_id.keys(), key=lambda n: n.lower()),
+        index=None,
+        placeholder="Escribe para buscar...",
+        label_visibility="collapsed",
+    )
+    if buscada:
+        st.session_state["selected_empresa"] = name_to_id[buscada]
+        view = "Empresa"
 
     selected_empresa = st.session_state.get("selected_empresa")
     for e in empresas:
@@ -142,7 +176,7 @@ def render_alerts(alerts):
 def render_task_row(t, empresas_by_id, show_company=False):
     nombre = empresas_by_id.get(t["empresa_id"], {}).get("nombre", t["empresa_id"])
     is_done = t["estado"] == "hecho"
-    c1, c2 = st.columns([0.06, 0.94])
+    c1, c2, c3 = st.columns([0.06, 0.82, 0.12])
     with c1:
         checked = st.checkbox("", value=is_done, key=f'chk_{t["id"]}', label_visibility="collapsed")
         if checked != is_done:
@@ -160,6 +194,10 @@ def render_task_row(t, empresas_by_id, show_company=False):
         if show_company:
             meta += f' <span style="font-size:0.75rem;color:#888;">· {nombre}</span>'
         st.markdown(meta, unsafe_allow_html=True)
+    with c3:
+        if t["fecha"] and not is_done:
+            link = outlook_link(t["descripcion"], nombre, t["fecha"], t["tipo"])
+            st.link_button("Outlook", link, use_container_width=True)
 
 
 def render_quick_add(fixed_empresa_id=None, empresa_names=None):
@@ -175,7 +213,7 @@ def render_quick_add(fixed_empresa_id=None, empresa_names=None):
         descripcion = cols[1].text_input("Descripción", label_visibility="collapsed", placeholder="¿Qué falta?")
         tipo = cols[2].selectbox("Tipo", ["contable", "informacion", "reunion"],
                                   format_func=lambda x: TIPO_LABEL[x], label_visibility="collapsed")
-        fecha = cols[3].date_input("Fecha", value=None, label_visibility="collapsed")
+        fecha = cols[3].date_input("Fecha", value=None, format="DD/MM/YYYY", label_visibility="collapsed")
         submitted = cols[4].form_submit_button("Añadir")
         if submitted and descripcion.strip():
             eid = fixed_empresa_id if fixed_empresa_id else db.ensure_empresa(empresa_nombre.strip())
@@ -218,7 +256,7 @@ elif view == "Calendario":
     if c1.button("◀"):
         st.session_state["cal_month"] = (cur.replace(day=1) - timedelta(days=1)).replace(day=1)
         st.rerun()
-    c2.markdown(f"### {cur.strftime('%B %Y').capitalize()}")
+    c2.markdown(f"### {MESES_ES[cur.month - 1]} {cur.year}")
     if c3.button("▶"):
         nxt_month = cur.month % 12 + 1
         nxt_year = cur.year + (1 if cur.month == 12 else 0)
@@ -275,20 +313,28 @@ elif view == "Empresa" and st.session_state.get("selected_empresa"):
             edit_mode = st.session_state.get(f"edit_{eid}", False)
             if edit_mode:
                 with st.form(f"edit_form_{eid}"):
+                    actividad = st.text_input("A qué se dedican", value=e.get("actividad", ""))
                     responsable = st.text_input("Responsable", value=e["responsable"])
-                    particularidades = st.text_area("Particularidades", value=e["particularidades"])
                     c1, c2 = st.columns(2)
-                    if c1.form_submit_button("Guardar"):
-                        db.update_empresa(eid, responsable, particularidades)
+                    analitica = c1.checkbox("Lleva analítica", value=bool(e.get("analitica", 0)))
+                    sii = c2.checkbox("Está en el SII", value=bool(e.get("sii", 0)))
+                    particularidades = st.text_area("Apreciaciones / notas", value=e["particularidades"])
+                    c3, c4 = st.columns(2)
+                    if c3.form_submit_button("Guardar"):
+                        db.update_empresa(eid, responsable, particularidades, actividad, analitica, sii)
                         st.session_state[f"edit_{eid}"] = False
                         st.rerun()
-                    if c2.form_submit_button("Cancelar"):
+                    if c4.form_submit_button("Cancelar"):
                         st.session_state[f"edit_{eid}"] = False
                         st.rerun()
             else:
                 c1, c2 = st.columns(2)
-                c1.markdown(f"**Responsable**  \n{e['responsable'] or '_Sin asignar_'}")
-                c2.markdown(f"**Particularidades**  \n{e['particularidades'] or '_Sin notas_'}")
+                c1.markdown(f"**A qué se dedican**  \n{e.get('actividad') or '_Sin especificar_'}")
+                c2.markdown(f"**Responsable**  \n{e['responsable'] or '_Sin asignar_'}")
+                c3, c4 = st.columns(2)
+                c3.markdown(f"**Analítica**  \n{'Sí' if e.get('analitica') else 'No'}")
+                c4.markdown(f"**SII**  \n{'Sí' if e.get('sii') else 'No'}")
+                st.markdown(f"**Apreciaciones**  \n{e['particularidades'] or '_Sin notas_'}")
                 if st.button("Editar", key=f"editbtn_{eid}"):
                     st.session_state[f"edit_{eid}"] = True
                     st.rerun()
