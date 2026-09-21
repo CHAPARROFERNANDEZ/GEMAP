@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta
 import streamlit as st
 
 import db
+import outlook
 
 # ---------------------------------------------------------------- Setup
 st.set_page_config(
@@ -140,6 +141,43 @@ with st.sidebar:
                 st.session_state["selected_empresa"] = eid
                 st.rerun()
 
+    st.markdown("---")
+    st.markdown("**Outlook**")
+    if not outlook.configured():
+        st.caption("Sin configurar todavía.")
+    elif outlook.is_connected():
+        cuenta = outlook.connected_account_name()
+        st.success(f"Conectado ({cuenta})" if cuenta else "Conectado", icon="✅")
+        if st.button("Desconectar", key="outlook_disconnect"):
+            outlook.disconnect()
+            st.rerun()
+    else:
+        if "outlook_flow" not in st.session_state:
+            if st.button("Conectar con Outlook"):
+                try:
+                    st.session_state["outlook_flow"] = outlook.start_device_flow()
+                except Exception as e:
+                    st.error(str(e))
+                st.rerun()
+        else:
+            flow = st.session_state["outlook_flow"]
+            st.info(f"Entra en **{flow['verification_uri']}** e introduce el código:")
+            st.code(flow["user_code"])
+            c1, c2 = st.columns(2)
+            if c1.button("Ya lo he autorizado"):
+                estado, detalle = outlook.try_complete_device_flow(flow)
+                if estado == "ok":
+                    del st.session_state["outlook_flow"]
+                    st.rerun()
+                elif estado == "pending":
+                    st.warning("Todavía no lo veo autorizado — hazlo y vuelve a pulsar.")
+                else:
+                    st.error(detalle)
+                    del st.session_state["outlook_flow"]
+            if c2.button("Cancelar"):
+                del st.session_state["outlook_flow"]
+                st.rerun()
+
 if st.session_state.get("selected_empresa") and view not in ("Resumen", "Calendario"):
     view = "Empresa"
 
@@ -196,8 +234,24 @@ def render_task_row(t, empresas_by_id, show_company=False):
         st.markdown(meta, unsafe_allow_html=True)
     with c3:
         if t["fecha"] and not is_done:
-            link = outlook_link(t["descripcion"], nombre, t["fecha"], t["tipo"])
-            st.link_button("Outlook", link, use_container_width=True)
+            if t.get("outlook_event_id"):
+                st.caption("✓ Outlook")
+            elif outlook.is_connected():
+                if st.button("Sincronizar", key=f'sync_{t["id"]}', use_container_width=True):
+                    ok, res = outlook.create_event(
+                        subject=f'{nombre}: {t["descripcion"]}',
+                        date_str=t["fecha"][:10],
+                        body=f'Recordatorio GEMAP ({TIPO_LABEL.get(t["tipo"], t["tipo"])}) — {nombre}',
+                        location=nombre,
+                    )
+                    if ok:
+                        db.set_outlook_event_id(t["id"], res)
+                        st.rerun()
+                    else:
+                        st.error(res)
+            else:
+                link = outlook_link(t["descripcion"], nombre, t["fecha"], t["tipo"])
+                st.link_button("Outlook", link, use_container_width=True)
 
 
 def render_quick_add(fixed_empresa_id=None, empresa_names=None):
@@ -219,7 +273,17 @@ def render_quick_add(fixed_empresa_id=None, empresa_names=None):
             eid = fixed_empresa_id if fixed_empresa_id else db.ensure_empresa(empresa_nombre.strip())
             if eid:
                 fecha_str = fecha.isoformat() if fecha else None
-                db.add_tarea(eid, descripcion.strip(), tipo, fecha_str)
+                tid = db.add_tarea(eid, descripcion.strip(), tipo, fecha_str)
+                if fecha_str and outlook.is_connected():
+                    nombre_empresa = (empresa_names or {}).get(eid) or empresa_nombre or eid
+                    ok, res = outlook.create_event(
+                        subject=f'{nombre_empresa}: {descripcion.strip()}',
+                        date_str=fecha_str,
+                        body=f'Recordatorio GEMAP ({TIPO_LABEL.get(tipo, tipo)}) — {nombre_empresa}',
+                        location=nombre_empresa,
+                    )
+                    if ok:
+                        db.set_outlook_event_id(tid, res)
                 st.rerun()
 
 
