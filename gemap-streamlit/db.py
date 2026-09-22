@@ -150,3 +150,11 @@ def delete_tarea(tarea_id: str):
     conn.execute("DELETE FROM tareas WHERE id = ?", (tarea_id,))
     conn.commit()
     conn.close()
+
+
+def delete_empresa(empresa_id: str):
+    conn = get_conn()
+    conn.execute("DELETE FROM tareas WHERE empresa_id = ?", (empresa_id,))
+    conn.execute("DELETE FROM empresas WHERE id = ?", (empresa_id,))
+    conn.commit()
+    conn.close()
