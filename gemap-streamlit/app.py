@@ -254,33 +254,53 @@ def render_task_row(t, empresas_by_id, show_company=False):
                 st.link_button("Outlook", link, use_container_width=True)
 
 
+NUEVA_EMPRESA_SENTINEL = "➕ Nueva empresa..."
+
+
 def render_quick_add(fixed_empresa_id=None, empresa_names=None):
     st.markdown("---")
     st.markdown("##### Añadir algo rápido")
     with st.form(f"quickadd_{fixed_empresa_id or 'global'}", clear_on_submit=True):
         cols = st.columns([2, 3, 2, 2, 1])
-        empresa_nombre = fixed_empresa_id
-        if not fixed_empresa_id:
-            empresa_nombre = cols[0].text_input("Empresa", label_visibility="collapsed", placeholder="Empresa")
-        else:
+        empresa_elegida = None
+        nueva_empresa_nombre = ""
+        if fixed_empresa_id:
             cols[0].markdown(f"**{empresa_names.get(fixed_empresa_id)}**")
+        else:
+            nombres = sorted([e["nombre"] for e in empresas], key=lambda n: n.lower())
+            empresa_elegida = cols[0].selectbox(
+                "Empresa", options=nombres + [NUEVA_EMPRESA_SENTINEL],
+                index=None, placeholder="Elige o busca...", label_visibility="collapsed",
+            )
+            if empresa_elegida == NUEVA_EMPRESA_SENTINEL:
+                nueva_empresa_nombre = cols[0].text_input(
+                    "Nombre de la nueva empresa", label_visibility="collapsed",
+                    placeholder="Nombre de la nueva empresa")
         descripcion = cols[1].text_input("Descripción", label_visibility="collapsed", placeholder="¿Qué falta?")
         tipo = cols[2].selectbox("Tipo", ["contable", "informacion", "reunion"],
                                   format_func=lambda x: TIPO_LABEL[x], label_visibility="collapsed")
         fecha = cols[3].date_input("Fecha", value=None, format="DD/MM/YYYY", label_visibility="collapsed")
         submitted = cols[4].form_submit_button("Añadir")
         if submitted and descripcion.strip():
-            eid = fixed_empresa_id if fixed_empresa_id else db.ensure_empresa(empresa_nombre.strip())
+            if fixed_empresa_id:
+                nombre_final = empresa_names.get(fixed_empresa_id)
+            elif empresa_elegida == NUEVA_EMPRESA_SENTINEL:
+                nombre_final = nueva_empresa_nombre.strip()
+            else:
+                nombre_final = empresa_elegida
+            if not nombre_final:
+                st.error("Elige una empresa o escribe el nombre de una nueva.")
+                return
+            eid = fixed_empresa_id if fixed_empresa_id else db.ensure_empresa(nombre_final)
             if eid:
                 fecha_str = fecha.isoformat() if fecha else None
                 tid = db.add_tarea(eid, descripcion.strip(), tipo, fecha_str)
                 if fecha_str and outlook.is_connected():
-                    nombre_empresa = (empresa_names or {}).get(eid) or empresa_nombre or eid
                     ok, res = outlook.create_event(
-                        subject=f'{nombre_empresa}: {descripcion.strip()}',
+                        subject=f'{nombre_final}: {descripcion.strip()}',
                         date_str=fecha_str,
-                        body=f'Recordatorio GEMAP ({TIPO_LABEL.get(tipo, tipo)}) — {nombre_empresa}',
-                        location=nombre_empresa,
+                        body=f'Recordatorio GEMAP ({TIPO_LABEL.get(tipo, tipo)}) — {nombre_final}',
+                        location=nombre_final,
                     )
                     if ok:
                         db.set_outlook_event_id(tid, res)
@@ -401,6 +421,23 @@ elif view == "Empresa" and st.session_state.get("selected_empresa"):
                 st.markdown(f"**Apreciaciones**  \n{e['particularidades'] or '_Sin notas_'}")
                 if st.button("Editar", key=f"editbtn_{eid}"):
                     st.session_state[f"edit_{eid}"] = True
+                    st.rerun()
+
+            st.markdown("---")
+            if st.session_state.get(f"confirm_delete_{eid}"):
+                st.warning(f"¿Seguro que quieres eliminar **{e['nombre']}** y todas sus tareas? No se puede deshacer.")
+                cd1, cd2 = st.columns(2)
+                if cd1.button("Sí, eliminar definitivamente", key=f"delok_{eid}", type="primary"):
+                    db.delete_empresa(eid)
+                    st.session_state.pop("selected_empresa", None)
+                    st.session_state.pop(f"confirm_delete_{eid}", None)
+                    st.rerun()
+                if cd2.button("Cancelar", key=f"delcancel_{eid}"):
+                    st.session_state[f"confirm_delete_{eid}"] = False
+                    st.rerun()
+            else:
+                if st.button("🗑️ Eliminar empresa", key=f"delbtn_{eid}"):
+                    st.session_state[f"confirm_delete_{eid}"] = True
                     st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
 
