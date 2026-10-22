@@ -1,3 +1,5 @@
 streamlit>=1.37
 msal>=1.28
 requests>=2.31
+pandas>=2.0
+openpyxl>=3.1
