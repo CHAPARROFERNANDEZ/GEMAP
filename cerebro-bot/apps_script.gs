@@ -20,6 +20,8 @@ function instalar() {
   ScriptApp.getProjectTriggers().forEach(function (t) { ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('vigilarDrive').timeBased().everyMinutes(1).create();
   ScriptApp.newTrigger('enviarAvisos').timeBased().everyMinutes(1).create();
+  ScriptApp.newTrigger('moverArchivos').timeBased().everyMinutes(1).create();
+  ScriptApp.newTrigger('publicarPendientes').timeBased().everyMinutes(5).create();
 }
 
 function post_(path, payload) {
@@ -96,4 +98,52 @@ function enviarAvisos() {
       }
     }
   }
+}
+
+
+// El agente pide mover archivos escribiendo filas en la hoja "Movimientos"
+// (Fecha, Empresa, Id archivo, Nombre archivo, Id carpeta destino, Ruta destino, Motivo, Hecho).
+// Este script, que se ejecuta con tu cuenta, los mueve. Solo dentro de la misma empresa.
+function moverArchivos() {
+  var sh = SpreadsheetApp.openById(TABLERO_ID).getSheetByName('Movimientos');
+  if (!sh || sh.getLastRow() < 2) return;
+  var rows = sh.getRange(2, 1, sh.getLastRow() - 1, 8).getValues();
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    if (!r[2] || !r[4] || r[7]) continue;
+    var estado;
+    try {
+      var f = Drive.Files.get(String(r[2]).trim(), { fields: 'id,parents,trashed' });
+      var origen = f.parents && f.parents.length ? ubicar_(f.parents[0]) : null;
+      var destino = ubicar_(String(r[4]).trim());
+      if (f.trashed) {
+        estado = 'RECHAZADO: archivo en la papelera';
+      } else if (!origen || !destino || origen.empresa !== destino.empresa) {
+        estado = 'RECHAZADO: origen y destino no son de la misma empresa';
+      } else if (f.parents[0] === String(r[4]).trim()) {
+        estado = 'OK (ya estaba en su sitio)';
+      } else {
+        DriveApp.getFileById(f.id).moveTo(DriveApp.getFolderById(String(r[4]).trim()));
+        estado = 'OK ' + Utilities.formatDate(new Date(), 'Europe/Madrid', 'dd/MM/yyyy HH:mm');
+      }
+    } catch (e) {
+      estado = 'ERROR: ' + String(e.message).slice(0, 120);
+    }
+    sh.getRange(i + 2, 8).setValue(estado);
+  }
+}
+
+// Manda al bot las tareas abiertas agrupadas por empresa, para consultarlas por Telegram.
+function publicarPendientes() {
+  var sh = SpreadsheetApp.openById(TABLERO_ID).getSheetByName('Tareas');
+  if (!sh || sh.getLastRow() < 2) return;
+  var rows = sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
+  var por = {};
+  rows.forEach(function (r) {
+    if (!r[0] || !r[1]) return;
+    if (String(r[5]).toLowerCase().indexOf('cerr') === 0) return;
+    var lim = r[4] instanceof Date ? Utilities.formatDate(r[4], 'Europe/Madrid', 'dd/MM/yyyy') : String(r[4] || '');
+    (por[r[1]] = por[r[1]] || []).push({ id: r[0], tarea: String(r[2]).slice(0, 400), prio: String(r[3]), limite: lim });
+  });
+  post_('/pendientes', { empresas: por });
 }

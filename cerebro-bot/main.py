@@ -43,6 +43,7 @@ async def registrar_webhook():
     except Exception as e:  # el bot debe arrancar aunque falle esto
         print(f"[telegram] error al registrar webhook: {type(e).__name__}", flush=True)
 pending = defaultdict(list)      # empresa -> archivos nuevos
+pendientes = {}                  # empresa -> tareas abiertas (las publica el Apps Script)
 seen = {}                        # id de archivo -> fecha de modificación ya procesada
 last_event = 0.0
 last_fire = 0.0
@@ -54,15 +55,85 @@ def check_secret(value: str):
         raise HTTPException(status_code=401)
 
 
-async def telegram(text: str, chat_id: str = ""):
+async def telegram(text: str, chat_id: str = "", teclado=None):
     chat = chat_id or OWNER_CHAT_ID
     if not chat:
         return
+    body = {"chat_id": chat, "text": text[:4000], "disable_web_page_preview": True}
+    if teclado:
+        body["reply_markup"] = {"inline_keyboard": teclado}
     async with httpx.AsyncClient(timeout=20) as c:
-        await c.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": chat, "text": text[:4000], "disable_web_page_preview": True},
-        )
+        await c.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=body)
+
+
+async def responder_boton(callback_id: str):
+    async with httpx.AsyncClient(timeout=10) as c:
+        await c.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                     json={"callback_query_id": callback_id})
+
+
+def nombre_corto(emp: str) -> str:
+    return emp.split(" - ", 1)[-1].strip()
+
+
+def orden_prio(t):
+    return {"alta": 0, "media": 1, "baja": 2}.get(str(t.get("prio", "")).lower(), 3)
+
+
+def lista_empresas():
+    """Empresas con tareas abiertas, las que tienen más prioridad alta primero."""
+    def clave(item):
+        emp, ts = item
+        return (-sum(1 for t in ts if orden_prio(t) == 0), -len(ts), emp)
+    return [e for e, _ in sorted(pendientes.items(), key=clave) if pendientes[e]]
+
+
+def teclado_empresas(nombres):
+    filas, fila = [], []
+    for emp in nombres[:60]:
+        idx = lista_empresas().index(emp) if emp in lista_empresas() else 0
+        fila.append({"text": f"{nombre_corto(emp)[:28]} ({len(pendientes[emp])})", "callback_data": f"e:{idx}"})
+        if len(fila) == 2:
+            filas.append(fila)
+            fila = []
+    if fila:
+        filas.append(fila)
+    return filas
+
+
+async def mostrar_empresa(emp: str, chat_id: str = ""):
+    ts = sorted(pendientes.get(emp, []), key=orden_prio)
+    if not ts:
+        await telegram(f"{nombre_corto(emp)}: no tiene tareas abiertas.", chat_id)
+        return
+    partes, actual = [], f"{nombre_corto(emp)} - {len(ts)} tareas abiertas\n"
+    grupo = None
+    for t in ts:
+        if t.get("prio") != grupo:
+            grupo = t.get("prio")
+            actual += f"\n[{grupo or 'Sin prioridad'}]\n"
+        lim = f" (límite {t['limite']})" if t.get("limite") else ""
+        linea = f"- {t['id']}: {t['tarea']}{lim}\n"
+        if len(actual) + len(linea) > 3800:
+            partes.append(actual)
+            actual = ""
+        actual += linea
+    partes.append(actual)
+    for i, p in enumerate(partes):
+        await telegram(p, chat_id, [[{"text": "Otras empresas", "callback_data": "lista"}]] if i == len(partes) - 1 else None)
+
+
+async def mostrar_lista(chat_id: str = ""):
+    nombres = lista_empresas()
+    if not nombres:
+        await telegram("Todavía no tengo tareas cargadas. Espera unos minutos y prueba otra vez.", chat_id)
+        return
+    await telegram("¿De qué empresa quieres ver lo que queda por hacer?", chat_id, teclado_empresas(nombres))
+
+
+def buscar_empresas(texto: str):
+    t = texto.lower().strip()
+    return [e for e in pendientes if t and t in e.lower()]
 
 
 async def fire_routine(summary: str) -> str:
@@ -136,6 +207,15 @@ async def drive_event(request: Request, x_secret: str = Header(default="")):
     return {"recibidos": nuevos}
 
 
+@app.post("/pendientes")
+async def recibir_pendientes(request: Request, x_secret: str = Header(default="")):
+    check_secret(x_secret)
+    data = await request.json()
+    pendientes.clear()
+    pendientes.update(data.get("empresas", {}))
+    return {"empresas": len(pendientes)}
+
+
 @app.post("/aviso")
 async def aviso(request: Request, x_secret: str = Header(default="")):
     check_secret(x_secret)
@@ -151,9 +231,10 @@ async def telegram_webhook(path: str, request: Request):
     if not hmac.compare_digest(path, WEBHOOK_PATH):
         raise HTTPException(status_code=404)
     update = await request.json()
-    msg = update.get("message") or {}
+    cb = update.get("callback_query")
+    msg = update.get("message") or (cb or {}).get("message") or {}
     chat_id = str((msg.get("chat") or {}).get("id", ""))
-    text = (msg.get("text") or "").strip()
+    text = (msg.get("text") or "").strip() if not cb else ""
     if not chat_id:
         return {"ok": True}
     if not OWNER_CHAT_ID:
@@ -162,8 +243,47 @@ async def telegram_webhook(path: str, request: Request):
         return {"ok": True}
     if chat_id != OWNER_CHAT_ID:
         return {"ok": True}               # ignora a cualquier otra persona
-    if text.startswith("/estado"):
-        await telegram(f"Pendientes de analizar: {sum(len(v) for v in pending.values())} archivos.")
+
+    if cb:
+        await responder_boton(cb.get("id", ""))
+        datos = cb.get("data", "")
+        if datos == "lista":
+            await mostrar_lista(chat_id)
+        elif datos.startswith("e:"):
+            nombres = lista_empresas()
+            try:
+                await mostrar_empresa(nombres[int(datos[2:])], chat_id)
+            except (ValueError, IndexError):
+                await mostrar_lista(chat_id)
+        return {"ok": True}
+
+    low = text.lower()
+    if low.startswith("/estado"):
+        await telegram(f"Pendientes de analizar: {sum(len(v) for v in pending.values())} archivos. "
+                       f"Empresas con tareas abiertas: {len(lista_empresas())}.")
+    elif low in ("/empresas", "/start", "empresas", "lista"):
+        await mostrar_lista(chat_id)
+    elif low.startswith("/cierre"):
+        nombre = text[7:].strip()
+        coincide = buscar_empresas(nombre)
+        if len(coincide) != 1:
+            await telegram("Dime la empresa: /cierre ANJOBER" if not nombre else
+                           f"No sé cuál es. Coincidencias: {', '.join(nombre_corto(e) for e in coincide) or 'ninguna'}", chat_id)
+        else:
+            estado = await fire_routine(
+                f"MODO CIERRE: {coincide[0]}. Haz la revisión de cierre completa de esta empresa (solo esta) "
+                "según el apartado MODO CIERRE de las instrucciones y deja los avisos en la hoja Avisos.")
+            await telegram(f"Lanzo el cierre de {nombre_corto(coincide[0])}." if estado.startswith("2")
+                           else f"No he podido lanzar el cierre (estado {estado}).", chat_id)
+    elif text.startswith("/"):
+        await telegram("Escribe el nombre de una empresa, o /empresas para elegirla de una lista. "
+                       "Con /cierre NOMBRE lanzo el cierre completo de esa empresa.", chat_id)
     else:
-        await telegram("Recibido. De momento solo envío avisos; las órdenes (mover reuniones, añadir tareas) llegan en la fase 2.")
+        coincide = buscar_empresas(text)
+        if len(coincide) == 1:
+            await mostrar_empresa(coincide[0], chat_id)
+        elif coincide:
+            await telegram("Hay varias, ¿cuál?", chat_id, teclado_empresas(coincide))
+        else:
+            await mostrar_lista(chat_id)
     return {"ok": True}
