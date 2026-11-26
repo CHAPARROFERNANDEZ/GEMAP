@@ -143,7 +143,23 @@ function publicarPendientes() {
     if (!r[0] || !r[1]) return;
     if (String(r[5]).toLowerCase().indexOf('cerr') === 0) return;
     var lim = r[4] instanceof Date ? Utilities.formatDate(r[4], 'Europe/Madrid', 'dd/MM/yyyy') : String(r[4] || '');
-    (por[r[1]] = por[r[1]] || []).push({ id: r[0], tarea: String(r[2]).slice(0, 400), prio: String(r[3]), limite: lim });
+    (por[r[1]] = por[r[1]] || []).push({ id: r[0], tarea: String(r[2]).slice(0, 900), prio: String(r[3]), limite: lim });
   });
   post_('/pendientes', { empresas: por });
+  publicarAsientos_();
+}
+
+// Publica la hoja Asientos para que el bot genere el Excel (/asientos).
+function publicarAsientos_() {
+  var sh = SpreadsheetApp.openById(TABLERO_ID).getSheetByName('Asientos');
+  if (!sh || sh.getLastRow() < 2) return;
+  var rows = sh.getRange(2, 1, sh.getLastRow() - 1, 9).getValues();
+  var por = {};
+  rows.forEach(function (r) {
+    if (!r[0] || !r[1]) return;
+    var f = r[2] instanceof Date ? Utilities.formatDate(r[2], 'Europe/Madrid', 'dd/MM/yyyy') : String(r[2] || '');
+    var num = function (v) { return v === '' || v === null ? '' : Number(v); };
+    (por[r[0]] = por[r[0]] || []).push([String(r[1]), f, String(r[4]), num(r[5]), num(r[6]), String(r[7]), String(r[8]), String(r[3])]);
+  });
+  post_('/asientos', { empresas: por });
 }

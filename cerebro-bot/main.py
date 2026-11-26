@@ -5,6 +5,7 @@ y reenvía los avisos a Telegram. Solo responde al chat de Yuri.
 """
 import asyncio
 import hmac
+import io
 import os
 import time
 from collections import defaultdict
@@ -44,6 +45,7 @@ async def registrar_webhook():
         print(f"[telegram] error al registrar webhook: {type(e).__name__}", flush=True)
 pending = defaultdict(list)      # empresa -> archivos nuevos
 pendientes = {}                  # empresa -> tareas abiertas (las publica el Apps Script)
+asientos = {}                    # empresa -> filas de asientos propuestos (las publica el Apps Script)
 seen = {}                        # id de archivo -> fecha de modificación ya procesada
 last_event = 0.0
 last_fire = 0.0
@@ -120,7 +122,73 @@ async def mostrar_empresa(emp: str, chat_id: str = ""):
         actual += linea
     partes.append(actual)
     for i, p in enumerate(partes):
-        await telegram(p, chat_id, [[{"text": "Otras empresas", "callback_data": "lista"}]] if i == len(partes) - 1 else None)
+        if i == len(partes) - 1:
+            idx = lista_empresas().index(emp) if emp in lista_empresas() else None
+            fila = [{"text": "Otras empresas", "callback_data": "lista"}]
+            if idx is not None and asientos.get(emp):
+                fila.insert(0, {"text": "Excel de asientos", "callback_data": f"x:{idx}"})
+            await telegram(p, chat_id, [fila])
+        else:
+            await telegram(p, chat_id)
+
+
+def construir_excel(empresas):
+    """Excel con una hoja por empresa: asientos propuestos, con totales por hoja."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    wb = Workbook()
+    wb.remove(wb.active)
+    cab = ["Asiento", "Fecha", "Cuenta", "Debe", "Haber", "Concepto", "Estado", "Tarea"]
+    for emp in empresas:
+        filas = asientos.get(emp, [])
+        ws = wb.create_sheet(nombre_corto(emp)[:31].replace("/", "-"))
+        ws.append(cab)
+        for c in ws[1]:
+            c.font = Font(bold=True, color="FFFFFF")
+            c.fill = PatternFill("solid", fgColor="1F3864")
+        previo = None
+        for r in filas:
+            # r = [asiento, fecha, cuenta, debe, haber, concepto, estado, tarea]
+            if previo is not None and r[0] != previo:
+                ws.append([])
+            previo = r[0]
+            ws.append([r[0], r[1], r[2], r[3] if r[3] != "" else None, r[4] if r[4] != "" else None, r[5], r[6], r[7]])
+        ultima = ws.max_row
+        ws.append([])
+        ws.append(["TOTAL", "", "", f"=SUM(D2:D{ultima})", f"=SUM(E2:E{ultima})", "", "", ""])
+        for c in ws[ws.max_row]:
+            c.font = Font(bold=True)
+        for row in ws.iter_rows(min_row=2, min_col=4, max_col=5):
+            for c in row:
+                c.number_format = '#,##0.00'
+        for col, ancho in zip("ABCDEFGH", (11, 12, 46, 14, 14, 58, 26, 11)):
+            ws.column_dimensions[col].width = ancho
+        ws.freeze_panes = "A2"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+async def enviar_excel_asientos(emp: str = "", chat_id: str = ""):
+    """emp vacío = todas las empresas con asientos."""
+    nombres = [emp] if emp else sorted(e for e, f in asientos.items() if f)
+    nombres = [e for e in nombres if asientos.get(e)]
+    if not nombres:
+        await telegram("Todavía no hay asientos propuestos para eso. Se cargan cada 5 minutos desde la hoja Asientos.", chat_id)
+        return
+    datos = await asyncio.to_thread(construir_excel, nombres)
+    etiqueta = nombre_corto(nombres[0]) if len(nombres) == 1 else "grupo"
+    nombre_archivo = f"asientos_{etiqueta.lower().replace(' ', '_')}_{time.strftime('%Y%m%d')}.xlsx"
+    n = sum(len(asientos[e]) for e in nombres)
+    async with httpx.AsyncClient(timeout=60) as c:
+        r = await c.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
+                         data={"chat_id": chat_id or OWNER_CHAT_ID,
+                               "caption": f"Asientos propuestos: {etiqueta} ({n} líneas). Estado: Provisional = contra 570.1, "
+                                          "Propuesto = listo para contabilizar, el resto depende de la condición indicada."},
+                         files={"document": (nombre_archivo, datos,
+                                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+    if r.status_code != 200:
+        await telegram(f"No he podido enviar el Excel (estado {r.status_code}).", chat_id)
 
 
 async def mostrar_lista(chat_id: str = ""):
@@ -216,6 +284,15 @@ async def recibir_pendientes(request: Request, x_secret: str = Header(default=""
     return {"empresas": len(pendientes)}
 
 
+@app.post("/asientos")
+async def recibir_asientos(request: Request, x_secret: str = Header(default="")):
+    check_secret(x_secret)
+    data = await request.json()
+    asientos.clear()
+    asientos.update(data.get("empresas", {}))
+    return {"empresas": len(asientos), "lineas": sum(len(v) for v in asientos.values())}
+
+
 @app.post("/aviso")
 async def aviso(request: Request, x_secret: str = Header(default="")):
     check_secret(x_secret)
@@ -249,6 +326,12 @@ async def telegram_webhook(path: str, request: Request):
         datos = cb.get("data", "")
         if datos == "lista":
             await mostrar_lista(chat_id)
+        elif datos.startswith("x:"):
+            nombres = lista_empresas()
+            try:
+                await enviar_excel_asientos(nombres[int(datos[2:])], chat_id)
+            except (ValueError, IndexError):
+                await mostrar_lista(chat_id)
         elif datos.startswith("e:"):
             nombres = lista_empresas()
             try:
@@ -263,6 +346,18 @@ async def telegram_webhook(path: str, request: Request):
                        f"Empresas con tareas abiertas: {len(lista_empresas())}.")
     elif low in ("/empresas", "/start", "empresas", "lista"):
         await mostrar_lista(chat_id)
+    elif low.startswith("/asientos") or low.startswith("asientos"):
+        nombre = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
+        if not nombre or nombre.lower() in ("todos", "todas", "grupo"):
+            await enviar_excel_asientos("", chat_id)
+        else:
+            coincide = [e for e in asientos if nombre.lower() in e.lower()]
+            if len(coincide) == 1:
+                await enviar_excel_asientos(coincide[0], chat_id)
+            else:
+                await telegram("No sé cuál es. Escribe /asientos y el nombre (ANJOBER, REAL ESTATE, PROINVER) "
+                               "o solo /asientos para recibir todas." if not coincide else
+                               f"Hay varias: {', '.join(nombre_corto(e) for e in coincide)}. Escribe un poco más del nombre.", chat_id)
     elif low.startswith("/cierre"):
         nombre = text[7:].strip()
         coincide = buscar_empresas(nombre)
@@ -277,6 +372,7 @@ async def telegram_webhook(path: str, request: Request):
                            else f"No he podido lanzar el cierre (estado {estado}).", chat_id)
     elif text.startswith("/"):
         await telegram("Escribe el nombre de una empresa, o /empresas para elegirla de una lista. "
+                       "Con /asientos NOMBRE te envío el Excel de asientos propuestos (o /asientos para todas). "
                        "Con /cierre NOMBRE lanzo el cierre completo de esa empresa.", chat_id)
     else:
         coincide = buscar_empresas(text)
