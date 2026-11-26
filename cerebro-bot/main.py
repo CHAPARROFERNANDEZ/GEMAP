@@ -12,16 +12,36 @@ from collections import defaultdict
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"].strip().strip('"\'')
 OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "")           # chat de Yuri
-SHARED_SECRET = os.environ["SHARED_SECRET"]                   # Apps Script -> bot
-WEBHOOK_PATH = os.environ["WEBHOOK_PATH"]                     # ruta secreta de Telegram
+SHARED_SECRET = os.environ["SHARED_SECRET"].strip()                   # Apps Script -> bot
+WEBHOOK_PATH = os.environ["WEBHOOK_PATH"].strip().strip("/")                     # ruta secreta de Telegram
 ROUTINE_FIRE_URL = os.environ.get("ROUTINE_FIRE_URL", "")     # URL del activador API
 ROUTINE_TOKEN = os.environ.get("ROUTINE_TOKEN", "")           # token de la rutina
 DEBOUNCE_SECONDS = int(os.environ.get("DEBOUNCE_SECONDS", "180"))
 MIN_SECONDS_BETWEEN_RUNS = int(os.environ.get("MIN_SECONDS_BETWEEN_RUNS", "600"))
 
 app = FastAPI()
+
+
+@app.on_event("startup")
+async def registrar_webhook():
+    """Comprueba el token y registra el webhook de Telegram. No escribe el token en los logs."""
+    dominio = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            me = await c.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe")
+            print(f"[telegram] getMe -> HTTP {me.status_code} {me.json().get('description', 'ok')}", flush=True)
+            if me.status_code != 200 or not dominio:
+                print(f"[telegram] sin webhook (dominio={'si' if dominio else 'no'})", flush=True)
+                return
+            r = await c.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook",
+                json={"url": f"https://{dominio}/telegram/{WEBHOOK_PATH}"},
+            )
+            print(f"[telegram] setWebhook -> HTTP {r.status_code} {r.json().get('description', '')}", flush=True)
+    except Exception as e:  # el bot debe arrancar aunque falle esto
+        print(f"[telegram] error al registrar webhook: {type(e).__name__}", flush=True)
 pending = defaultdict(list)      # empresa -> archivos nuevos
 last_event = 0.0
 last_fire = 0.0
