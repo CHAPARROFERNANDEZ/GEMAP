@@ -43,6 +43,7 @@ async def registrar_webhook():
     except Exception as e:  # el bot debe arrancar aunque falle esto
         print(f"[telegram] error al registrar webhook: {type(e).__name__}", flush=True)
 pending = defaultdict(list)      # empresa -> archivos nuevos
+seen = {}                        # id de archivo -> fecha de modificación ya procesada
 last_event = 0.0
 last_fire = 0.0
 worker = None
@@ -103,7 +104,8 @@ async def flush_when_quiet():
         )
         status = await fire_routine(text)
         last_fire = time.time()
-        await telegram("Archivos recibidos. Analizo:\n" + "\n".join(lines) + f"\n(estado {status})")
+        if not status.startswith("2"):
+            await telegram(f"No he podido lanzar la revisión (estado {status}). Archivos pendientes:\n" + "\n".join(lines))
         break
     worker = None
 
@@ -118,12 +120,20 @@ async def drive_event(request: Request, x_secret: str = Header(default="")):
     global last_event, worker
     check_secret(x_secret)
     data = await request.json()
+    nuevos = 0
     for f in data.get("archivos", []):
+        if seen.get(f.get("id")) == f.get("modified"):
+            continue  # ya procesado: Drive avisa también al mover o abrir un archivo
+        seen[f.get("id")] = f.get("modified")
         pending[data.get("empresa", "(sin empresa)")].append(f)
-    last_event = time.time()
-    if worker is None or worker.done():
-        worker = asyncio.create_task(flush_when_quiet())
-    return {"recibidos": len(data.get("archivos", []))}
+        nuevos += 1
+    if len(seen) > 5000:
+        seen.clear()
+    if nuevos:
+        last_event = time.time()
+        if worker is None or worker.done():
+            worker = asyncio.create_task(flush_when_quiet())
+    return {"recibidos": nuevos}
 
 
 @app.post("/aviso")
